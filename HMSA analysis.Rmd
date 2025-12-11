@@ -1,0 +1,214 @@
+---
+title: "HMSA analysis"
+author: "Sandhya Kajeepeta"
+date: "2025-06-05"
+output: html_document
+---
+
+```{r load packages,echo=FALSE, results=FALSE, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(sf)
+library(readxl)
+library(pscl)
+library(nlme)
+
+```
+
+#Load data
+```{r}
+q2 <- read_csv("./Data/2025Q2.csv")
+q1 <- read_csv("./Data/2025Q1.csv")
+q4 <- read_csv("./Data/2024Q4.csv")
+q3 <- read_csv("./Data/2024Q3.csv")
+```
+*Note: Precinct 116 is missing from Q3. Must drop Precinct 116 from analysis
+
+*Note: some files have Middle Eastern/Southwest Asian as a separate race category. We will combine with white for sake of alignment with Census data
+
+```{r}
+q3$L3_white <- q3$L3_white + q3$L3_ME
+q4$L1_white <- q4$L1_white + q4$L1_ME
+q4$L2_white <- q4$L2_white + q4$L2_ME
+q4$L3_white <- q4$L3_white + q4$L3_ME
+q1$L1_white <- q1$L1_white + q1$L1_ME
+q1$L2_white <- q1$L2_white + q1$L2_ME
+q1$L3_white <- q1$L3_white + q1$L3_ME
+q2$L1_white <- q2$L1_white + q2$L1_ME
+q2$L2_white <- q2$L2_white + q2$L2_ME
+q2$L3_white <- q2$L3_white + q2$L3_ME
+
+q1$L1_ME <- NULL
+q1$L2_ME <- NULL
+q4$L1_ME <- NULL
+q4$L2_ME <- NULL
+q2$L1_ME <- NULL
+q2$L2_ME <- NULL
+```
+
+#Combine quarters
+```{r}
+df <- rbind(q2, q1, q3, q4)
+df <- df %>% filter(Precinct != 116)
+df <- df %>% group_by(Precinct) %>% summarise_all(sum)
+```
+
+#Combine L1-L3
+```{r}
+df$all_total <- df$L1_total+df$L2_total+df$L3_total
+df$all_Black <- df$L1_Black+df$L2_Black+df$L3_Black
+df$all_Hisp <- df$L1_Hisp+df$L2_Hisp+df$L3_Hisp
+df$all_white <- df$L1_white+df$L2_white+df$L3_white
+```
+
+1. Overall encounters
+
+How many total encounters
+```{r}
+sum(df$all_total)
+```
+
+How many L1-L3 encounters
+```{r}
+sum(df$L1_total)
+sum(df$L2_total)
+sum(df$L3_total)
+```
+
+2. Racial disparities
+
+```{r}
+city <- df %>% summarise_all(sum)
+```
+
+#add population data from Census: https://www.census.gov/quickfacts/fact/table/newyorkcitynewyork/PST045224 
+```{r}
+city$tot_pop <- 8478072
+city$black_pop <- city$tot_pop*.227
+city$Hisp_pop <- city$tot_pop*.284
+city$white_pop <- city$tot_pop*.313
+```
+
+3. Precinct analysis
+
+#Bring in precinct demo data: https://johnkeefe.net/nyc-police-precinct-and-census-data 
+*Variables of interest: Total pop = P2_001N, non-Hispanic Black pop = P2_006N, Hispanic pop = P2_002N, non-Hispanic white pop = P2_005N
+```{r}
+pre <- read_csv("./Data/nyc_precinct_2020pop.csv")
+pre <- pre %>% rename(Precinct = precinct) %>% dplyr::select(c(Precinct, boro, P2_001N, P2_006N, P2_002N, P2_005N))
+
+df <- df %>% left_join(pre, by="Precinct")
+```
+
+#Calculate percent race demographics
+```{r}
+df$percent_Black <- df$P2_006N/df$P2_001N*100
+df$percent_Hisp <- df$P2_002N/df$P2_001N*100
+df$percent_white <- df$P2_005N/df$P2_001N*100
+```
+
+
+#Calculate stop rate
+```{r}
+df$stop_rate <- df$all_total/df$P2_001N*1000
+```
+
+
+#Plot data
+```{r}
+plot <- ggplot(df, mapping=aes(x=percent_Black, y=stop_rate)) + geom_point()
+plot
+
+#Outlier = Central Park precinct. Drop from analysis
+```
+
+#Drop Central Park precinct
+```{r}
+df <- df %>% filter(Precinct != 22)
+```
+
+#Plot data
+```{r}
+plot <- ggplot(df, mapping=aes(x=percent_Black, y=stop_rate)) + geom_point()
+plot
+```
+
+#Unadjusted associations with boro fixed effects
+*Unit of change is a 10 percentage point change in percent black
+##Run negative binomial regression and quasipoisson regression - by percent_black (10 percentage point increase) x total stop rate
+```{r}
+df$black10 <- (df$percent_Black/10)
+p1 <- glm(formula = all_total ~ black10 + boro + offset(log(P2_001N)), family=quasipoisson, data=df)
+summary(p1)
+exp(p1$coefficients["black10"])
+exp(confint(p1))
+
+
+library(MASS)
+nb1 <- glm.nb(formula=all_total~black10 + boro + offset(log(P2_001N)), data=df)
+
+summary(nb1)
+exp(nb1$coefficients["black10"])
+exp(confint(nb1))
+```
+
+#Calculate racial disparity
+```{r}
+df$black_stoprate <- df$all_Black/df$P2_006N*1000
+df$white_stoprate <- df$all_white/df$P2_005N*1000
+df$disp <- df$black_stoprate/df$white_stoprate
+```
+
+#Plot data
+```{r}
+plot <- ggplot(df, mapping=aes(x=percent_white, y=disp)) + geom_point()
+plot
+```
+
+
+#Unadjusted associations with boro fixed effects
+*Unit of change is a 10 percentage point change in percent white
+##Run linear regression - by percent_white (10 percentage point increase) x Black-white disparity
+```{r}
+df$white10 <- (df$percent_white/10)
+l1 <- glm(formula=disp~white10 + boro, data=df)
+
+summary(l1)
+confint(l1)
+```
+
+#Create plot
+```{r}
+df$boro <- ifelse(df$boro=="Staten", "Staten Island", df$boro)
+
+ggplot(df, aes(x = percent_white, y = disp, color = boro)) +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, aes(group = 1), color = "black") +
+  labs(
+    title = "Black-White Police Encounter Rate Disparity and\nPercentage of White Residents, by Precinct",
+    subtitle = "Racial demographic estimates are based on 2020 Census data.\nNYPD investigative encounter data are from July 2024 - June 2025.",
+    x = "Percentage of White Residents",
+    y = "Black-White Disparity in Rate of Police Encounters",
+    color = "Borough",
+    caption = "Chart: Thurgood Marshall Institute | Sources: NYPD Investigative Encounter Data, John Keefe NYC Police Precinct Data"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face="bold",size = 20)
+  )
+
+ggsave("my_plot.png", width = 8, height = 6, dpi = 300)
+```
+
+
+
+
+
+
+
+
+
+
+
